@@ -1,0 +1,30 @@
+
+{
+    "name": "NÜR - Halal Matchmaking",
+    "short_name": "NÜR",
+    "description": "Seriøs matchmakingplattform for muslimer",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#FFFFFF",
+    "theme_color": "#780000",
+    "orientation": "portrait-primary",
+    "icons": [
+      {
+        "src": "/nur.svg",
+        "sizes": "192x192",
+        "type": "image/svg"
+      }
+    ],
+    "screenshots": [
+      {
+        "src": "/screenshot-mobile.png",
+        "sizes": "640x1136",
+        "type": "image/png",
+        "form_factor": "narrow"
+      }
+    ],
+    "categories": ["social", "lifestyle"],
+    "lang": "no"
+  }
+  
+  
