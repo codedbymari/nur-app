@@ -1,9 +1,11 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import DebugPanel from '../../components/DebugPanel.js';
+import ErrorBoundary from '@/components/ErrorBoundary';
+import { getCurrentUTCDateTime, formatLocalDateTime, formatUTCDateTime } from '@/utils/dateTime';
 
 // Import components
 import LoginForm from '@/components/admin/LoginForm';
@@ -14,6 +16,20 @@ import SoknadCard from '@/components/admin/SoknadCard';
 import BrukerCard from '@/components/admin/BrukerCard';
 import InvitasjonCard from '@/components/admin/InvitasjonCard';
 import CreateInvitationForm from '@/components/admin/CreateInvitationForm';
+
+// Utility functions outside component to prevent re-creation
+const formatDato = (dateString) => {
+  return formatLocalDateTime(dateString);
+};
+
+const erUtlopt = (dato) => {
+  try {
+    return new Date(dato) < new Date();
+  } catch (error) {
+    console.error('Date comparison error:', error);
+    return true;
+  }
+};
 
 export default function AdminPage() {
   const [user, setUser] = useState(null);
@@ -27,18 +43,15 @@ export default function AdminPage() {
   const [loginError, setLoginError] = useState('');
   const [showCreateInvitation, setShowCreateInvitation] = useState(false);
   const router = useRouter();
+  
+  // Use refs to prevent unnecessary re-renders
+  const isDataLoading = useRef(false);
+  const hasLoadedInitialData = useRef(false);
 
-  useEffect(() => {
-    checkUser();
-  }, []);
+  // Memoize admin emails to prevent re-creation
+  const adminEmails = useMemo(() => ['marjamahassanali@gmail.com', 'admin@nur.no'], []);
 
-  useEffect(() => {
-    if (user) {
-      loadData();
-    }
-  }, [user]);
-
-  const checkUser = async () => {
+  const checkUser = useCallback(async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       
@@ -48,8 +61,6 @@ export default function AdminPage() {
         return;
       }
 
-      // Check if user is admin
-      const adminEmails = ['marjamahassanali@gmail.com', 'admin@nur.no'];
       if (!adminEmails.includes(user.email)) {
         alert('Du har ikke tilgang til admin-panelet');
         router.push('/');
@@ -63,14 +74,214 @@ export default function AdminPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [adminEmails, router]);
 
-  const debugRLSAndQuery = () => {
-    console.log("debugRLSAndQuery is called");
-    // Add your debug logic here
-  };
+  // Optimized loadData with ref to prevent multiple calls
+  const loadData = useCallback(async () => {
+    // Prevent multiple simultaneous data loading calls
+    if (isDataLoading.current) {
+      return;
+    }
 
-  const handleLogin = async (loginForm) => {
+    isDataLoading.current = true;
+    
+    try {
+      const currentDateTime = getCurrentUTCDateTime();
+      console.log(`[${currentDateTime}] Loading data...`);
+   
+      // Load applications
+      const { data: soknadData, error: soknadError } = await supabase
+        .from('soknad')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (soknadError) throw soknadError;
+
+      // Load users
+      const { data: brukerData, error: brukerError } = await supabase
+        .from('brukere')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (brukerError) throw brukerError;
+
+      // Load invitations
+      const { data: invitasjonData, error: invitasjonError } = await supabase
+        .from('invitasjoner')
+        .select(`
+          *,
+          soknad (
+            id,
+            navn,
+            epost
+          )
+        `)
+        .order('opprettet_dato', { ascending: false });
+
+      if (invitasjonError) throw invitasjonError;
+
+      // Update state in batch to minimize re-renders
+      const newSoknader = soknadData || [];
+      const newBrukere = brukerData || [];
+      const newInvitasjoner = invitasjonData || [];
+
+      // Calculate statistics
+      const stats = {
+        totalSoknader: newSoknader.length,
+        ventendeSoknader: newSoknader.filter(s => s.status === 'pending').length,
+        godkjenteSoknader: newSoknader.filter(s => s.status === 'godkjent').length,
+        avslatteSoknader: newSoknader.filter(s => s.status === 'avslatt').length,
+        aktiveBrukere: newBrukere.filter(b => b.status === 'aktiv').length,
+        totalBrukere: newBrukere.length,
+        totalInvitasjoner: newInvitasjoner.length,
+        bruktInvitasjoner: newInvitasjoner.filter(i => i.brukt).length,
+        aktiveInvitasjoner: newInvitasjoner.filter(i => !i.brukt && new Date(i.utloper_dato) > new Date()).length
+      };
+
+      // Batch state updates
+      setSoknader(newSoknader);
+      setBrukere(newBrukere);
+      setInvitasjoner(newInvitasjoner);
+      setStatistikk(stats);
+      
+      hasLoadedInitialData.current = true;
+
+    } catch (error) {
+      const currentDateTime = getCurrentUTCDateTime();
+      console.error(`[${currentDateTime}] Data loading error:`, error);
+      alert('Feil ved lasting av data');
+    } finally {
+      isDataLoading.current = false;
+    }
+  }, []);
+
+  // Create invitation function - fixed with correct column names
+  const opprettInvitasjon = useCallback(async (soknadId, customMessage = '') => {
+    try {
+      const kode = Math.random().toString(36).substring(2, 10).toUpperCase();
+      const utloperAt = new Date();
+      utloperAt.setDate(utloperAt.getDate() + 14);
+      
+      const invitationData = {
+        kode,
+        soknad_id: soknadId,
+        utloper_dato: utloperAt.toISOString(),
+        message: customMessage || 'Velkommen til NÜR!',
+        opprettet_dato: new Date().toISOString(),
+        brukt: false,
+        max_bruk: 1
+      };
+      
+      console.log('📝 Creating invitation:', invitationData);
+
+      const { data, error } = await supabase
+        .from('invitasjoner')
+        .insert(invitationData)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('❌ Invitation error:', error);
+        throw error;
+      }
+      
+      console.log('✅ Invitation created:', data);
+      return kode;
+    } catch (error) {
+      console.error('Invitation creation failed:', error);
+      throw error;
+    }
+  }, []);
+
+  // Updated status update function with proper memoization
+  const oppdaterSoknadStatus = useCallback(async (soknadId, nyStatus) => {
+    console.log('🔧 oppdaterSoknadStatus called with:', { soknadId, nyStatus });
+    
+    try {
+      const currentDateTime = getCurrentUTCDateTime();
+      console.log(`[${currentDateTime}] Updating application status: ${soknadId} to ${nyStatus}`);
+      
+      // Update the application status in Supabase
+      const { error } = await supabase
+        .from('soknad')
+        .update({ 
+          status: nyStatus,
+          updated_at: currentDateTime
+        })
+        .eq('id', soknadId);
+
+      if (error) {
+        console.error('Supabase update error:', error);
+        throw new Error(`Database error: ${error.message}`);
+      }
+
+      console.log('Status update successful');
+
+      // Handle invitation creation for approved applications
+      let invitationCreated = false;
+      if (nyStatus === 'godkjent') {
+        try {
+          await opprettInvitasjon(soknadId);
+          console.log('Invitation created successfully');
+          invitationCreated = true;
+        } catch (inviteError) {
+          console.error('Failed to create invitation:', inviteError);
+          alert('Søknad godkjent, men det oppstod en feil ved opprettelse av invitasjon');
+        }
+      }
+
+      // Update local state immediately (optimistic update)
+      setSoknader(prevSoknader => {
+        const updatedSoknader = prevSoknader.map(soknad => 
+          soknad.id === soknadId 
+            ? { ...soknad, status: nyStatus, updated_at: currentDateTime }
+            : soknad
+        );
+        
+        return updatedSoknader;
+      });
+
+      // Update statistics separately to avoid closure issues
+      setStatistikk(prevStats => {
+        let newStats = { ...prevStats };
+        
+        // Find the old status from the current state
+        const oldSoknad = soknader.find(s => s.id === soknadId);
+        if (oldSoknad) {
+          // Decrease count for old status
+          if (oldSoknad.status === 'pending') newStats.ventendeSoknader--;
+          else if (oldSoknad.status === 'godkjent') newStats.godkjenteSoknader--;
+          else if (oldSoknad.status === 'avslatt') newStats.avslatteSoknader--;
+        }
+        
+        // Increase count for new status
+        if (nyStatus === 'pending') newStats.ventendeSoknader++;
+        else if (nyStatus === 'godkjent') newStats.godkjenteSoknader++;
+        else if (nyStatus === 'avslatt') newStats.avslatteSoknader++;
+        
+        // Update invitation stats if invitation was created
+        if (invitationCreated) {
+          newStats.totalInvitasjoner++;
+          newStats.aktiveInvitasjoner++;
+        }
+        
+        return newStats;
+      });
+
+      // Show success message
+      const successMessage = nyStatus === 'godkjent' 
+        ? 'Søknad godkjent og invitasjon opprettet'
+        : `Søknad ${nyStatus === 'avslått' ? 'avslått' : 'oppdatert'}`;
+      
+      alert(successMessage);
+      
+    } catch (error) {
+      const currentDateTime = getCurrentUTCDateTime();
+      console.error(`[${currentDateTime}] Status update error:`, error);
+      alert('Feil ved oppdatering: ' + error.message);
+    }
+  }, [opprettInvitasjon, soknader]);
+
+  const handleLogin = useCallback(async (loginForm) => {
     setLoginError('');
     
     try {
@@ -84,8 +295,6 @@ export default function AdminPage() {
         return;
       }
 
-      // Check if logged in user is admin
-      const adminEmails = ['marjamahassanali@gmail.com', 'admin@nur.no'];
       if (!adminEmails.includes(data.user.email)) {
         setLoginError('Du har ikke tilgang til admin-panelet');
         await supabase.auth.signOut();
@@ -98,121 +307,21 @@ export default function AdminPage() {
       console.error('Login error:', error);
       setLoginError('Det oppstod en feil ved innlogging');
     }
-  };
+  }, [adminEmails]);
 
-  const handleLogout = async () => {
+  const handleLogout = useCallback(async () => {
     try {
       await supabase.auth.signOut();
       setUser(null);
       setShowLogin(true);
+      hasLoadedInitialData.current = false;
       router.push('/');
     } catch (error) {
       console.error('Logout error:', error);
     }
-  };
+  }, [router]);
 
-  const loadData = async () => {
-    try {
-      // Load applications
-      const { data: soknadData, error: soknadError } = await supabase
-        .from('soknad')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (soknadError) throw soknadError;
-      setSoknader(soknadData || []);
-
-      // Load users
-      const { data: brukerData, error: brukerError } = await supabase
-        .from('brukere')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (brukerError) throw brukerError;
-      setBrukere(brukerData || []);
-
-      // Load invitations
-      const { data: invitasjonData, error: invitasjonError } = await supabase
-        .from('invitasjoner')
-        .select(`
-          *,
-          soknad (
-            id,
-            navn,
-            epost
-          )
-        `)
-        .order('created_at', { ascending: false });
-
-      if (invitasjonError) throw invitasjonError;
-      setInvitasjoner(invitasjonData || []);
-
-      // Calculate statistics
-      const stats = {
-        totalSoknader: soknadData?.length || 0,
-        ventendeSoknader: soknadData?.filter(s => s.status === 'pending').length || 0,
-        godkjenteSoknader: soknadData?.filter(s => s.status === 'godkjent').length || 0,
-        avslatteSoknader: soknadData?.filter(s => s.status === 'avslatt').length || 0,
-        aktiveBrukere: brukerData?.filter(b => b.status === 'aktiv').length || 0,
-        totalBrukere: brukerData?.length || 0,
-        totalInvitasjoner: invitasjonData?.length || 0,
-        bruktInvitasjoner: invitasjonData?.filter(i => i.brukt).length || 0,
-        aktiveInvitasjoner: invitasjonData?.filter(i => !i.brukt && new Date(i.utloper_dato) > new Date()).length || 0
-      };
-      setStatistikk(stats);
-
-    } catch (error) {
-      console.error('Feil ved lasting av data:', error);
-      alert('Feil ved lasting av data');
-    }
-  };
-
-  const oppdaterSoknadStatus = async (soknadId, nyStatus) => {
-    try {
-      const { error } = await supabase
-        .from('soknad')
-        .update({ status: nyStatus })
-        .eq('id', soknadId);
-
-      if (error) throw error;
-
-      // If approved, create invitation automatically
-      if (nyStatus === 'godkjent') {
-        await opprettInvitasjon(soknadId);
-      }
-
-      await loadData();
-      alert(`Søknad ${nyStatus === 'godkjent' ? 'godkjent' : 'avslått'} ${nyStatus === 'godkjent' ? 'og invitasjon opprettet' : ''}`);
-    } catch (error) {
-      console.error('Feil ved oppdatering av status:', error);
-      alert('Feil ved oppdatering av status');
-    }
-  };
-
-  const opprettInvitasjon = async (soknadId, customMessage = '') => {
-    try {
-      const kode = Math.random().toString(36).substring(2, 10).toUpperCase();
-      const utloperAt = new Date();
-      utloperAt.setDate(utloperAt.getDate() + 14); // Expires in 14 days
-
-      const { error } = await supabase
-        .from('invitasjoner')
-        .insert({
-          kode,
-          soknad_id: soknadId,
-          utloper_dato: utloperAt.toISOString(),
-          message: customMessage || 'Velkommen til NÜR!'
-        });
-
-      if (error) throw error;
-      return kode;
-    } catch (error) {
-      console.error('Feil ved opprettelse av invitasjon:', error);
-      throw error;
-    }
-  };
-
-  const opprettManuellInvitasjon = async (formData) => {
+  const opprettManuellInvitasjon = useCallback(async (formData) => {
     try {
       const kode = await opprettInvitasjon(
         formData.soknad_id || null,
@@ -225,15 +334,15 @@ export default function AdminPage() {
     } catch (error) {
       alert('Feil ved opprettelse av invitasjon');
     }
-  };
+  }, [opprettInvitasjon, loadData]);
 
-  const kopierInvitasjonskode = (kode) => {
+  const kopierInvitasjonskode = useCallback((kode) => {
     const inviteUrl = `${window.location.origin}/invite/${kode}`;
     navigator.clipboard.writeText(inviteUrl);
     alert('Invitasjonslenke kopiert til utklippstavle!');
-  };
+  }, []);
 
-  const slettInvitasjon = async (invitasjonId) => {
+  const slettInvitasjon = useCallback(async (invitasjonId) => {
     if (!confirm('Er du sikker på at du vil slette denne invitasjonen?')) {
       return;
     }
@@ -251,22 +360,59 @@ export default function AdminPage() {
       console.error('Feil ved sletting av invitasjon:', error);
       alert('Feil ved sletting av invitasjon');
     }
-  };
+  }, [loadData]);
 
-  const formatDato = (dateString) => {
-    if (!dateString) return 'Ukjent dato';
-    return new Date(dateString).toLocaleDateString('nb-NO', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
+  // Effects
+  useEffect(() => {
+    checkUser();
+  }, [checkUser]);
 
-  const erUtlopt = (dato) => {
-    return new Date(dato) < new Date();
-  };
+  useEffect(() => {
+    if (user && !hasLoadedInitialData.current) {
+      loadData();
+    }
+  }, [user, loadData]);
+
+  // Memoize the SoknadCards to prevent unnecessary re-renders
+  const soknadCards = useMemo(() => {
+    return soknader.map((soknad) => (
+      <SoknadCard 
+        key={soknad.id}
+        soknad={soknad}
+        onUpdateStatus={oppdaterSoknadStatus}
+        formatDato={formatDato}
+      />
+    ));
+  }, [soknader, oppdaterSoknadStatus]);
+
+  // Memoize the BrukerCards
+  const brukerCards = useMemo(() => {
+    return brukere.map((bruker) => (
+      <ErrorBoundary key={`error-boundary-${bruker.id}`}>
+        <BrukerCard 
+          key={bruker.id}
+          bruker={bruker}
+          formatDato={formatDato}
+        />
+      </ErrorBoundary>
+    ));
+  }, [brukere]);
+
+  // Memoize the InvitasjonCards
+  const invitasjonCards = useMemo(() => {
+    return invitasjoner.map((invitasjon) => (
+      <ErrorBoundary key={`error-boundary-${invitasjon.id}`}>
+        <InvitasjonCard 
+          key={invitasjon.id}
+          invitasjon={invitasjon}
+          onCopyCode={kopierInvitasjonskode}
+          onDelete={slettInvitasjon}
+          formatDato={formatDato}
+          erUtlopt={erUtlopt}
+        />
+      </ErrorBoundary>
+    ));
+  }, [invitasjoner, kopierInvitasjonskode, slettInvitasjon]);
 
   // Login form
   if (showLogin) {
@@ -286,102 +432,84 @@ export default function AdminPage() {
     );
   }
 
+  // Main render
   return (
     <div className="min-h-screen bg-white">
       <AdminHeader 
         user={user}
         onLogout={handleLogout}
       />
-      {/* Add this temporarily for debugging */}
-      <DebugPanel />
+      
+      {process.env.NODE_ENV === 'development' && <DebugPanel />}
 
-      <div className="max-w-7xl mx-auto p-6">
-        <StatisticsGrid statistikk={statistikk} />
+      <ErrorBoundary>
+        <div className="max-w-7xl mx-auto p-6">
+          <StatisticsGrid statistikk={statistikk} />
+          
+          <TabNavigation 
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
+          />
 
-        <TabNavigation 
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-        />
-
-        {/* Tab Content */}
-        {activeTab === 'soknader' && (
-          <div className="space-y-4">
-            <h2 className="text-2xl font-bold text-[#780000] mb-4">Søknader</h2>
-            {soknader.length === 0 ? (
-              <div className="bg-[#FDF0D5] p-6 rounded-lg text-center">
-                <p className="text-gray-600">Ingen søknader funnet</p>
-              </div>
-            ) : (
-              soknader.map((soknad) => (
-                <SoknadCard 
-                  key={soknad.id}
-                  soknad={soknad}
-                  onStatusUpdate={oppdaterSoknadStatus}
-                  formatDato={formatDato}
-                />
-              ))
-            )}
-          </div>
-        )}
-
-        {activeTab === 'brukere' && (
-          <div className="space-y-4">
-            <h2 className="text-2xl font-bold text-[#780000] mb-4">Brukere</h2>
-            {brukere.length === 0 ? (
-              <div className="bg-[#FDF0D5] p-6 rounded-lg text-center">
-                <p className="text-gray-600">Ingen brukere funnet</p>
-              </div>
-            ) : (
-              brukere.map((bruker) => (
-                <BrukerCard 
-                  key={bruker.id}
-                  bruker={bruker}
-                  formatDato={formatDato}
-                />
-              ))
-            )}
-          </div>
-        )}
-
-        {activeTab === 'invitasjoner' && (
-          <div className="space-y-4">
-            <div className="flex justify-between items-center">
-              <h2 className="text-2xl font-bold text-[#780000]">Invitasjoner</h2>
-              <button
-                onClick={() => setShowCreateInvitation(true)}
-                className="bg-[#780000] text-white px-4 py-2 rounded-lg hover:bg-[#C1121F] transition-colors"
-              >
-                Opprett ny invitasjon
-              </button>
+          {activeTab === 'soknader' && (
+            <div className="space-y-4">
+              <h2 className="text-2xl font-bold text-[#780000] mb-4">Søknader</h2>
+              {soknader.length === 0 ? (
+                <div className="bg-[#FDF0D5] p-6 rounded-lg text-center">
+                  <p className="text-gray-600">Ingen søknader funnet</p>
+                </div>
+              ) : (
+                soknadCards
+              )}
             </div>
+          )}
 
-            {showCreateInvitation && (
-              <CreateInvitationForm 
-                soknader={soknader.filter(s => s.status === 'godkjent')}
-                onSubmit={opprettManuellInvitasjon}
-                onCancel={() => setShowCreateInvitation(false)}
-              />
-            )}
+          {activeTab === 'brukere' && (
+            <div className="space-y-4">
+              <h2 className="text-2xl font-bold text-[#780000] mb-4">Brukere</h2>
+              {brukere.length === 0 ? (
+                <div className="bg-[#FDF0D5] p-6 rounded-lg text-center">
+                  <p className="text-gray-600">Ingen brukere funnet</p>
+                </div>
+              ) : (
+                brukerCards
+              )}
+            </div>
+          )}
 
-            {invitasjoner.length === 0 ? (
-              <div className="bg-[#FDF0D5] p-6 rounded-lg text-center">
-                <p className="text-gray-600">Ingen invitasjoner funnet</p>
+          {activeTab === 'invitasjoner' && (
+            <div className="space-y-4">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-2xl font-bold text-[#780000]">Invitasjoner</h2>
+                <button
+                  onClick={() => setShowCreateInvitation(true)}
+                  className="bg-[#780000] text-white px-4 py-2 rounded-lg hover:bg-[#C1121F] transition-colors"
+                >
+                  Opprett ny invitasjon
+                </button>
               </div>
-            ) : (
-              invitasjoner.map((invitasjon) => (
-                <InvitasjonCard 
-                  key={invitasjon.id}
-                  invitasjon={invitasjon}
-                  onCopyCode={kopierInvitasjonskode}
-                  onDelete={slettInvitasjon}
-                  formatDato={formatDato}
-                  erUtlopt={erUtlopt}
-                />
-              ))
-            )}
-          </div>
-        )}
-      </div>
+
+              {showCreateInvitation && (
+                <ErrorBoundary>
+                  <CreateInvitationForm 
+                    soknader={soknader.filter(s => s.status === 'godkjent')}
+                    onSubmit={opprettManuellInvitasjon}
+                    onCancel={() => setShowCreateInvitation(false)}
+                  />
+                </ErrorBoundary>
+              )}
+
+              {invitasjoner.length === 0 ? (
+                <div className="bg-[#FDF0D5] p-6 rounded-lg text-center">
+                  <p className="text-gray-600">Ingen invitasjoner funnet</p>
+                </div>
+              ) : (
+                invitasjonCards
+              )}
+            </div>
+          )}
+        </div>
+      </ErrorBoundary>
     </div>
   );
 }

@@ -41,8 +41,8 @@ export default function ChatPage() {
           match_dato,
           bruker1_id,
           bruker2_id,
-          profiles!bruker1_id(navn, by),
-          profiles!bruker2_id(navn, by)
+    brukere!bruker1_id(navn, bosted),
+    brukere!bruker2_id(navn, bosted)
         `)
         .or(`bruker1_id.eq.${user.id},bruker2_id.eq.${user.id}`)
         .not('interesse_bruker1', 'is', null)
@@ -55,12 +55,13 @@ export default function ChatPage() {
 
       const chatsWithPartner = matches.map(match => {
         const isUser1 = match.bruker1_id === user.id;
-        const partner = isUser1 ? match.profiles[1] : match.profiles[0];
-        
+        const partner = isUser1 ? match.bruker2 : match.bruker1;
+         
         return {
           id: match.id,
+          partnerId: isUser1 ? match.bruker2_id : match.bruker1_id,
           partnerName: partner.navn,
-          partnerLocation: partner.by,
+          partnerLocation: partner.bosted,
           matchDate: match.match_dato,
           lastMessage: null, // Vil bli oppdatert med siste melding
           unreadCount: 0
@@ -83,10 +84,10 @@ export default function ChatPage() {
 
   const loadLastMessage = async (matchId) => {
     const { data, error } = await supabase
-      .from('chat_messages')
+      .from('kommunikasjon')
       .select('melding, created_at, sender_id')
       .eq('match_id', matchId)
-      .order('created_at', { ascending: false })
+      .order('created_at.desc')
       .limit(1);
 
     if (!error && data.length > 0) {
@@ -101,21 +102,21 @@ export default function ChatPage() {
   const loadMessages = async (matchId) => {
     try {
       const { data, error } = await supabase
-        .from('chat_messages')
+        .from('kommunikasjon')  // Your table is called 'kommunikasjon'
         .select(`
           id,
           melding,
-          created_at,
+          sendt_tid,
           sender_id,
-          profiles(navn)
         `)
-        .eq('match_id', matchId)
-        .order('created_at', { ascending: true });
-
+        .eq('matcher_id', matchId)  // Column is 'matcher_id', not 'match_id'
+        .order('sendt_tid', { ascending: true });  // Column is 'sendt_tid', not 'created_at'
+  
       if (error) throw error;
-      setMessages(data || []);
+      return data;
     } catch (error) {
-      console.error('Feil ved lasting av meldinger:', error);
+      console.error('Error loading messages:', error);
+      return [];
     }
   };
 
@@ -127,7 +128,7 @@ export default function ChatPage() {
         {
           event: 'INSERT',
           schema: 'public',
-          table: 'chat_messages',
+          table: 'kommunikasjon',
           filter: `match_id=eq.${matchId}`
         },
         (payload) => {
@@ -148,7 +149,7 @@ export default function ChatPage() {
 
     try {
       const { error } = await supabase
-        .from('chat_messages')
+        .from('kommunikasjon')
         .insert({
           match_id: selectedChat.id,
           sender_id: currentUser.id,

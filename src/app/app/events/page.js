@@ -49,9 +49,9 @@ export default function EventsPage() {
   const loadUserProfile = async () => {
     try {
       const { data, error } = await supabase
-        .from('profiles')
+        .from('brukere')
         .select('*')
-        .eq('id', user.id)
+        .eq('id', user.id,)
         .single();
 
       if (error) throw error;

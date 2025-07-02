@@ -54,7 +54,7 @@ export default function Dashboard() {
         .from('matcher')
         .select('*, profil:profiler(*)')
         .eq('bruker_id', user.id)
-        .order('created_at', { ascending: false })
+        .order('created_at.desc')
         .limit(5);
 
       setRecentActivity(aktivitet || []);

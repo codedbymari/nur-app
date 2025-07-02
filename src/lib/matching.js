@@ -36,14 +36,14 @@ export async function hentDagensMatches(brukerId) {
 
   // Hent brukerens profil
   const { data: brukerProfil } = await supabase
-    .from('profiles')
+    .from('brukere')
     .select('*')
     .eq('id', brukerId)
     .single()
 
   // Hent alle andre aktive brukere
   const { data: andreBrukere } = await supabase
-    .from('profiles')
+    .from('brukere')
     .select('*')
     .neq('id', brukerId)
     .eq('aktiv', true)

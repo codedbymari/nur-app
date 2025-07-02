@@ -130,7 +130,7 @@ export default function InvitePage() {
       if (authData.user) {
         // Opprett brukerprofil
         const { error: profilError } = await supabase
-          .from('profiles')
+          .from('brukere')
           .insert({
             id: authData.user.id,
             navn: soknadData.navn,

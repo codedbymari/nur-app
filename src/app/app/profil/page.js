@@ -77,9 +77,9 @@ export default function ProfilPage() {
   const loadProfile = async () => {
     try {
       const { data, error } = await supabase
-        .from('profiles')
+        .from('brukere')
         .select('*')
-        .eq('id', user.id)
+        .eq('id', user.id,)
         .single();
 
       if (error) throw error;
@@ -163,7 +163,7 @@ export default function ProfilPage() {
     setSaving(true);
     try {
       const { error } = await supabase
-        .from('profiles')
+        .from('brukere')
         .update({
           navn: formData.navn.trim(),
           alder: parseInt(formData.alder),
@@ -223,7 +223,7 @@ export default function ProfilPage() {
 
     try {
       const { error } = await supabase
-        .from('profiles')
+        .from('brukere')
         .update({ aktiv: false })
         .eq('id', user.id);
 

@@ -1,4 +1,3 @@
-// public/sw.js (Service Worker)
 const CACHE_NAME = 'nur-v1';
 const urlsToCache = [
   '/',
@@ -7,6 +6,29 @@ const urlsToCache = [
   '/app',
   '/offline'
 ];
+
+// Helper function to check if URL should be cached
+const shouldCache = (request) => {
+  return !(
+    request.url.startsWith('chrome-extension://') || 
+    request.url.includes('chrome-extension')
+  ) && request.url.startsWith('http');
+};
+
+// Helper function to safely cache a request/response pair
+const safeCachePut = async (cache, request, response) => {
+  if (!shouldCache(request)) {
+    return false;
+  }
+
+  try {
+    await cache.put(request, response.clone());
+    return true;
+  } catch (error) {
+    console.error('Cache operation failed:', error);
+    return false;
+  }
+};
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -18,22 +40,22 @@ self.addEventListener('install', (event) => {
             return fetch(url)
               .then(response => {
                 if (response.ok) {
-                  return cache.put(url, response);
+                  return safeCachePut(cache, new Request(url), response);
                 } else {
                   console.warn(`Failed to cache ${url}: ${response.status}`);
-                  return Promise.resolve();
+                  return Promise.resolve(false);
                 }
               })
               .catch(error => {
                 console.warn(`Failed to fetch ${url}:`, error);
-                return Promise.resolve();
+                return Promise.resolve(false);
               });
           })
         );
       })
       .then(() => {
         console.log('Service worker installation completed');
-        self.skipWaiting(); // Activate immediately
+        return self.skipWaiting(); // Activate immediately
       })
       .catch(error => {
         console.error('Service worker installation failed:', error);
@@ -43,24 +65,36 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
-            console.log('Deleting old cache:', cacheName);
-            return caches.delete(cacheName);
-          }
-        })
-      );
-    }).then(() => {
-      return self.clients.claim(); // Take control of all clients
-    })
+    caches.keys()
+      .then((cacheNames) => {
+        return Promise.all(
+          cacheNames.map((cacheName) => {
+            if (cacheName !== CACHE_NAME) {
+              console.log('Deleting old cache:', cacheName);
+              return caches.delete(cacheName);
+            }
+            return Promise.resolve();
+          })
+        );
+      })
+      .then(() => {
+        return self.clients.claim(); // Take control of all clients
+      })
+      .catch(error => {
+        console.error('Service worker activation failed:', error);
+      })
   );
 });
 
 self.addEventListener('fetch', (event) => {
   // Only handle GET requests
   if (event.request.method !== 'GET') {
+    return;
+  }
+
+  // Don't cache chrome extension requests
+  if (!shouldCache(event.request)) {
+    event.respondWith(fetch(event.request));
     return;
   }
 
@@ -84,7 +118,10 @@ self.addEventListener('fetch', (event) => {
 
             caches.open(CACHE_NAME)
               .then((cache) => {
-                cache.put(event.request, responseToCache);
+                safeCachePut(cache, event.request, responseToCache);
+              })
+              .catch(error => {
+                console.error('Failed to open cache:', error);
               });
 
             return response;
@@ -94,37 +131,58 @@ self.addEventListener('fetch', (event) => {
             if (event.request.mode === 'navigate') {
               return caches.match('/offline');
             }
-            return new Response('Offline', { status: 503 });
+            return new Response('Offline', { 
+              status: 503,
+              headers: new Headers({
+                'Content-Type': 'text/plain'
+              })
+            });
           });
+      })
+      .catch(error => {
+        console.error('Cache match failed:', error);
+        return new Response('Service Worker Error', { 
+          status: 500,
+          headers: new Headers({
+            'Content-Type': 'text/plain'
+          })
+        });
       })
   );
 });
 
 // Prevent screenshots in sensitive areas
 self.addEventListener('message', (event) => {
-  if (event.data && event.data.type === 'BLOCK_SCREENSHOT') {
+  if (event.data?.type === 'BLOCK_SCREENSHOT') {
     // Signal to block screenshots - handled by client
-    self.clients.matchAll().then(clients => {
-      clients.forEach(client => {
-        client.postMessage({
-          type: 'BLOCK_SCREENSHOT_ACTIVE'
+    self.clients.matchAll()
+      .then(clients => {
+        clients.forEach(client => {
+          client.postMessage({
+            type: 'BLOCK_SCREENSHOT_ACTIVE'
+          });
         });
+      })
+      .catch(error => {
+        console.error('Failed to send screenshot block message:', error);
       });
-    });
   }
 });
 
-// Handle background sync (optional)
+// Handle background sync
 self.addEventListener('sync', (event) => {
   if (event.tag === 'background-sync') {
     event.waitUntil(
       // Handle background sync tasks
-      console.log('Background sync triggered')
+      new Promise((resolve) => {
+        console.log('Background sync triggered');
+        resolve();
+      })
     );
   }
 });
 
-// Handle push notifications (optional)
+// Handle push notifications
 self.addEventListener('push', (event) => {
   if (event.data) {
     const options = {
@@ -135,6 +193,9 @@ self.addEventListener('push', (event) => {
 
     event.waitUntil(
       self.registration.showNotification('NUR App', options)
+        .catch(error => {
+          console.error('Failed to show notification:', error);
+        })
     );
   }
 });
